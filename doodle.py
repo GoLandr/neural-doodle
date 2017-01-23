@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 #
 # Neural Doodle!
+# Copyright (c) 2017, Shaohua Li
 # Copyright (c) 2016, Alex J. Champandard.
-#
-# Research and Development sponsored by the nucl.ai Conference!
-#   http://events.nucl.ai/
-#   July 18-20, 2016 in Vienna/Austria.
 #
 
 import os
@@ -260,13 +257,13 @@ class NeuralGenerator(object):
         print(ansi.CYAN, end='')
         target = args.content or args.output
         self.content_img_original, self.content_map_original = self.load_images('content', target)
-        self.style_img_original, self.style_map_original = self.load_images('style', args.style)
+        self.style_imgs_original = self.load_dirImages('style', args.style)
 
         if self.content_map_original is None and self.content_img_original is None:
             print("  - No content files found; result depends on seed only.")
         print(ansi.ENDC, end='')
 
-        # Display some useful errors if the user's input can't be undrestood.
+        # Display some useful errors if the user's input can't be understood.
         if self.style_img_original is None:
             error("Couldn't find style image as expected.",
                   "  - Try making sure `{}` exists and is a valid image.".format(args.style))
@@ -327,6 +324,25 @@ class NeuralGenerator(object):
                   "  - Resize {} to {}, or\n  - Resize {} to {}."\
                   .format(filename, map.shape[1::-1], mapname, img.shape[1::-1]))
         return img, map
+
+    def load_dirImages(self, name, filename):
+        """If the image and map files exist, load them. Otherwise they'll be set to default values later.
+        """
+        imgs = []
+        if os.path.isfile(filename):
+            img = scipy.ndimage.imread(filename, mode='RGB')
+            imgs.append(img)
+            print( "%s image '%s' loaded" %(name, filename) )
+        elif os.path.isdir(filename):
+            filenames = os.listdir(filename)
+            for imgname in filenames:
+                img = scipy.ndimage.imread(imgname, mode='RGB')
+                imgs.append(img)
+            print("%d %s images in '%s' loaded" %( name, len(filenames), filename ) )
+        else:
+            error( "%s image path '%s' doesn't exist" %( name, filename ) )
+             
+        return imgs
 
     def compile(self, arguments, function):
         """Build a Theano function that will run the specified expression on the GPU.
@@ -470,6 +486,10 @@ class NeuralGenerator(object):
         """
         results = []
         # l: '3_1', f: sem3_1_output
+        # sem3_1_output.shape: [1,259,15,13]
+        # 259: conv3_1: 256 + map3_1: 3
+        # patches.shape: [10300,9]: 10300 = 259 * (15-2) * (13-2)
+        # patches shape after reshape: [143,259,3,3]
         for l, f in layers:
             # Use a Theano helper function to extract "neighbors" of specific size, seems a bit slower than doing
             # it manually but much simpler!
