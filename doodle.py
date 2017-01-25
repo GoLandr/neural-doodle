@@ -140,47 +140,17 @@ class Model(object):
         net['conv5_4'] = ConvLayer(net['conv5_3'], 512, 3, pad=1)
         net['main']    = net['conv5_4']
 
-        # Auxiliary network for the semantic layers, and the nearest neighbors calculations.
-        net['map'] = InputLayer((1, 1, None, None))
         for j, i in itertools.product(range(5), range(4)):
             if j < 2 and i > 1: continue
             suffix = '%i_%i' % (j+1, i+1)
-
-            if i == 0:
-                # PoolLayer: Pool2DLayer. 2**j: pooling region. mode: mean pooling
-                # all pooling layers net['map1'], ..., net['map5'] are fed by the same net['map']
-                net['map%i'%(j+1)] = PoolLayer(net['map'], 2**j, mode='average_exc_pad')
             self.channels[suffix] = net['conv'+suffix].num_filters
-            
-            '''
-            # semantic_weight default: 10
-            if args.semantic_weight > 0.0:
-                # sem1_1 <= conv1_1 + map1
-                # sem1_2 <= conv1_2 + map1
-                # sem2_1 <= conv2_1 + map2
-                # sem2_2 <= conv2_2 + map2
-                # sem3_1 <= conv3_1 + map3
-                # sem3_2 <= conv3_2 + map3
-                # sem3_3 <= conv3_3 + map3
-                # sem3_4 <= conv3_4 + map3
-                # sem4_1 <= conv4_1 + map4
-                # sem4_2 <= conv4_2 + map4
-                # sem4_3 <= conv4_3 + map4
-                # sem4_4 <= conv4_4 + map4
-                # sem5_1 <= conv5_1 + map5
-                # sem5_2 <= conv5_2 + map5
-                # sem5_3 <= conv5_3 + map5
-                # sem5_4 <= conv5_4 + map5
-                net['sem'+suffix] = ConcatLayer([net['conv'+suffix], net['map%i'%(j+1)]])
-            else:
-            '''
-            
+                        
             net['sem'+suffix] = net['conv'+suffix]
-
             net['dup'+suffix] = InputLayer(net['sem'+suffix].output_shape)
             net['nn'+suffix] = ConvLayer(net['dup'+suffix], 1, 3, b=None, pad=0, flip_filters=False)
             shape = net['nn'+suffix].W.get_value().shape
-            net['nn'+suffix].W = theano.shared( net['nn'+suffix].W.get_value(), broadcastable=[False]* len(shape) )
+            net['nn'+suffix].W = theano.shared( net['nn'+suffix].W.get_value(), 
+                                    broadcastable=[False]* len(shape) )
         self.network = net
 
     def load_data(self):
@@ -202,7 +172,7 @@ class Model(object):
         """
         self.tensor_img = T.tensor4()
         self.tensor_map = T.tensor4()
-        # self.network['img']: image input; self.network['map']: semantic input
+        # self.network['img']: image input
         tensor_inputs = {self.network['img']: self.tensor_img, self.network['map']: self.tensor_map}
         # outputs from 3 layers sem3_1, sem4_1, conv4_2, given tensor_img and tensor_map
         outputs = lasagne.layers.get_output([self.network[l] for l in layers], tensor_inputs)

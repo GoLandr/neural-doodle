@@ -147,8 +147,9 @@ class Model(object):
             suffix = '%i_%i' % (j+1, i+1)
 
             if i == 0:
-                # PoolLayer: Pool2DLayer. 2**j: pooling region. mode: mean pooling
+                # PoolLayer: Pool2DLayer. 2**j: pooling region. mode: mean pooling (majority voting)
                 # all pooling layers net['map1'], ..., net['map5'] are fed by the same net['map']
+                # net['map*'] are at decreasing granularity, in sync with conv*
                 net['map%i'%(j+1)] = PoolLayer(net['map'], 2**j, mode='average_exc_pad')
             self.channels[suffix] = net['conv'+suffix].num_filters
             
@@ -257,7 +258,7 @@ class NeuralGenerator(object):
         print(ansi.CYAN, end='')
         target = args.content or args.output
         self.content_img_original, self.content_map_original = self.load_images('content', target)
-        self.style_imgs_original = self.load_dirImages('style', args.style)
+        self.style_img_original, self.style_map_original = self.load_images('style', args.style)
 
         if self.content_map_original is None and self.content_img_original is None:
             print("  - No content files found; result depends on seed only.")
@@ -324,25 +325,6 @@ class NeuralGenerator(object):
                   "  - Resize {} to {}, or\n  - Resize {} to {}."\
                   .format(filename, map.shape[1::-1], mapname, img.shape[1::-1]))
         return img, map
-
-    def load_dirImages(self, name, filename):
-        """If the image and map files exist, load them. Otherwise they'll be set to default values later.
-        """
-        imgs = []
-        if os.path.isfile(filename):
-            img = scipy.ndimage.imread(filename, mode='RGB')
-            imgs.append(img)
-            print( "%s image '%s' loaded" %(name, filename) )
-        elif os.path.isdir(filename):
-            filenames = os.listdir(filename)
-            for imgname in filenames:
-                img = scipy.ndimage.imread(imgname, mode='RGB')
-                imgs.append(img)
-            print("%d %s images in '%s' loaded" %( name, len(filenames), filename ) )
-        else:
-            error( "%s image path '%s' doesn't exist" %( name, filename ) )
-             
-        return imgs
 
     def compile(self, arguments, function):
         """Build a Theano function that will run the specified expression on the GPU.
