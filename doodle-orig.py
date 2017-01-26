@@ -141,6 +141,7 @@ class Model(object):
         net['main']    = net['conv5_4']
 
         # Auxiliary network for the semantic layers, and the nearest neighbors calculations.
+        # batch size: 1. num_filters: 1 (temporary?)
         net['map'] = InputLayer((1, 1, None, None))
         for j, i in itertools.product(range(5), range(4)):
             if j < 2 and i > 1: continue
@@ -150,6 +151,7 @@ class Model(object):
                 # PoolLayer: Pool2DLayer. 2**j: pooling region. mode: mean pooling (majority voting)
                 # all pooling layers net['map1'], ..., net['map5'] are fed by the same net['map']
                 # net['map*'] are at decreasing granularity, in sync with conv*
+                # pooling layer keeps the channel num of the input layer net['map']. In the example, 3
                 net['map%i'%(j+1)] = PoolLayer(net['map'], 2**j, mode='average_exc_pad')
             self.channels[suffix] = net['conv'+suffix].num_filters
             
@@ -176,6 +178,9 @@ class Model(object):
                 net['sem'+suffix] = net['conv'+suffix]
 
             net['dup'+suffix] = InputLayer(net['sem'+suffix].output_shape)
+            # num_filters=1 is only a placeholder, will be updated to the actual number of filters
+            # according to style slice numbers
+            # nn filter size: 3*3
             net['nn'+suffix] = ConvLayer(net['dup'+suffix], 1, 3, b=None, pad=0, flip_filters=False)
             shape = net['nn'+suffix].W.get_value().shape
             net['nn'+suffix].W = theano.shared( net['nn'+suffix].W.get_value(), broadcastable=[False]* len(shape) )
@@ -377,8 +382,10 @@ class NeuralGenerator(object):
         self.style_img = self.model.prepare_image(style_img)
 
         style_map = self.rescale_image(self.style_map_original, scale)
+        # style_map.shape: (63, 52, 3)
         self.style_map = style_map.transpose((2, 0, 1))[np.newaxis].astype(np.float32)
-
+        # self.style_map.shape: (1, 3, 63, 52). channel num: 3
+        
         # Compile a function to run on the GPU to extract patches for all layers at once.
         # layer_outputs: [ ('3_1', sem3_1_output), ('4_1', sem4_1_output) ]
         #  sem3_1 = conv3_1 + map3, sem4_1 = conv4_1 + map4
@@ -392,8 +399,10 @@ class NeuralGenerator(object):
         extractor = self.compile([self.model.tensor_img, self.model.tensor_map], ext_patches)
         # feed two inputs into each of the 6 symbolic operators
         # Assign tensor_img = self.style_img, tensor_map = self.style_map
+        
+        # self.style_map.shape: (1, 3, 63, 52). channel num: 3
         result = extractor(self.style_img, self.style_map)
-        # result: conv output of style_img | style_map
+        # result: conv output of sem*, given style_img | style_map
         # a list of 6 arrays in shapes: 
         #          result[0::3]     result[1::3]     result[2::3]
         # sem3_1 (660, 259, 3, 3), (660, 1, 3, 3),  (660, 1, 3, 3),  
@@ -408,10 +417,11 @@ class NeuralGenerator(object):
             # data[2]: norms of semantic pooling layer output
             patches = data[0]
             l = self.model.network['nn'+layer]
-            # args.slices: 'Split patches up into this number of batches.'
+            # args.slices: 'Split patches up into this number of batches.' Default: 2
+            # nn3_1(4_1).num_filters: initialized to the style slice size. nn3_1(4_1).W will be set to patches later
             l.num_filters = patches.shape[0] // args.slices
             # self.style_data['3_1']: [0]: sem3_1_outneighbs, [1]: conv3_1_neibnorms, 
-            # [2]: map3_1_neibnorms, [3]: (660) - ?
+            # [2]: map3_1_neibnorms, [3]: zeros(660) - storing matching history used in evaluate_slices()
             self.style_data[layer] = [d[:l.num_filters*args.slices].astype(np.float16) for d in data]\
                                    + [np.zeros((patches.shape[0],), dtype=np.float16)]
             print('  - Style layer {}: {} patches in {:,}kb.'.format(layer, patches.shape, patches.size//1000))
@@ -429,16 +439,21 @@ class NeuralGenerator(object):
         
         # create empty Theano shared variable for matcher_history of 3_1 and 4_1
         self.matcher_tensors = {l: lasagne.utils.shared_empty(dim=4) for l in self.style_layers}
+        # matcher_history will be set to style_data[-1] later
         self.matcher_history = {l: T.vector() for l in self.style_layers} 
         # dup3_1 = matcher_tensors['3_1'], dup4_1 = matcher_tensors['4_1'] 
-        # matcher_tensors will be set to current_features: sem3_1, sem4_1 conv output on content_img
+        # matcher_tensors will be set to current_features: sem3_1, sem4_1 conv output given content_img
         # so dup* = conv output of sem* on content_img
+        # dup* is the input of sem*
         self.matcher_inputs = {self.model.network['dup'+l]: self.matcher_tensors[l] for l in self.style_layers}
         # nn_layers = ['nn3_1', 'nn4_1']
+        # nn*.W will be set to normalized style patches in evaluate_slices() <- evaluate() <- fmin_l_bfgs_b()
         nn_layers = [self.model.network['nn'+l] for l in self.style_layers]
         # 3_1 => nn3_1_output, 4_1 => nn4_1_output, given dup* = conv output of sem* on content_img
         self.matcher_outputs = dict(zip(self.style_layers, lasagne.layers.get_output(nn_layers, self.matcher_inputs)))
 
+        # conv of nn* computes the cross correlation between conv outputs of sem*, given content_img and style_img, respectively
+        # do_match_patches() will find the patch index corresponding to max conv output
         self.compute_matches = {l: self.compile([self.matcher_history[l]], self.do_match_patches(l))\
                                                 for l in self.style_layers}
 
@@ -462,6 +477,7 @@ class NeuralGenerator(object):
 
     # layers: [ ('3_1', sem(conv)3_1_output), ('4_1', sem(conv)4_1_output) ]
     # extract 3*3 patches from the conv output
+    # size = the filter size in nn* layers. So the patches will be assigned to nn*.W
     def do_extract_patches(self, layers, size=3, stride=1):
         """This function builds a Theano expression that will get compiled an run on the GPU. It extracts 3x3 patches
         from the intermediate outputs in the model.
@@ -493,6 +509,7 @@ class NeuralGenerator(object):
         # Use node in the model to compute the result of the normalized cross-correlation, using results from the
         # nearest-neighbor layers called 'nn3_1' and 'nn4_1'.
         # dist: distances (nn_layer outputs)
+        # print( self.model.network['nn'+layer].num_filters )
         dist = self.matcher_outputs[layer]
         dist = dist.reshape((dist.shape[1], -1))
         # Compute the score of each patch, taking into account statistics from previous iteration. This equalizes
@@ -525,7 +542,7 @@ class NeuralGenerator(object):
 
         # Build a list of loss components that compute the mean squared error by comparing current result to desired.
         for l, ref in zip(self.content_layers, result):
-            # input: tensor_img = current_img, tensor_map = content_style
+            # input: tensor_img = current_img, tensor_map = content_map
             # layer: output from conv4_2
             layer = self.model.tensor_outputs['conv'+l]
             loss = T.mean((layer - ref) ** 2.0)
@@ -544,7 +561,8 @@ class NeuralGenerator(object):
         # Extract the patches from the current image, as well as their magnitude.
         result = self.do_extract_patches(zip(self.style_layers, self.model.get_outputs('conv', self.style_layers)))
 
-        # Multiple style layers are optimized separately, usually conv3_1 and conv4_1 — semantic data not used here.
+        # Multiple style layers are optimized separately, usually conv3_1 and conv4_1. Semantic data not used here.
+        # Semantic data is only used for selecting nearest neighbor style patches
         for l, matches, patches in zip(self.style_layers, self.tensor_matches, result[0::3]):
             # Compute the mean squared error between the current patch and the best matching style patch.
             # Ignore the last channels (from semantic map) so errors returned are indicative of image only.
@@ -575,29 +593,36 @@ class NeuralGenerator(object):
             yield excerpt, [a[excerpt] for a in arrays]
 
     def evaluate_slices(self, f, l):
-        # if cache is on, only use saved matches
+        # if cache is on, only use previously saved matches
         if args.cache and l in self.style_cache:
             return self.style_cache[l]
 
-        # data: style patches & norms, i.e. 'nn3(4)_1' output on style_img & style_map
+        # style_data: style patches & norms, i.e. 'nn3(4)_1' output given style_img & style_map
         layer, data = self.model.network['nn'+l], self.style_data[l]
         history = data[-1]
 
         best_idx, best_val = None, 0.0
         # bp: sem3(4)_1_outneighbs, bi: conv3(4)_1_neibnorms, 
-        # bs: map3(4)_1_neibnorms,  bh: (660) - ?
+        # bs: map3(4)_1_neibnorms,  bh: (660) - history slice (not used: history is directly accessed)
         for idx, (bp, bi, bs, bh) in self.iterate_batches(*data, batch_size=layer.num_filters):
             weights = bp.astype(np.float32)
             # after normalization the conv result will be the cross correlation between sem* patches and the img patches
             self.normalize_components(l, weights, (bi, bs))
+            # weights.shape: (71, 259, 3, 3)
+            # layer.num_filters: 71. channels: 259
+            # print nn3_1.input_shape: (1,257,None,None).
+            # 257 is based on the initialized map shape: 1,1,..,..
+            # however the actual map shape is 1,3,..,... so nn3_1.input_shape should be 1,259,..,..
             layer.W.set_value(weights)
 
-            # history[idx] works as offsets to the correlations, to boost diversity
+            # history[idx] works as offsets to the correlations
+            # encourage matches that are different from the previous iteration, to boost diversity
             cur_idx, cur_val, cur_match = self.compute_matches[l](history[idx])
             if best_idx is None:
                 best_idx, best_val = cur_idx, cur_val
             else:
                 i = np.where(cur_val > best_val)
+                # update those indices where cur_val are larger. i is a boolean array
                 best_idx[i] = idx[cur_idx[i]]
                 best_val[i] = cur_val[i]
 
@@ -612,9 +637,10 @@ class NeuralGenerator(object):
         """
         # Xn: content_img or noisy input (depending on the program argument)
         # Adjust the representation to be compatible with the model before computing results.
+        # demean the original content image as the initialized transfer image
         current_img = Xn.reshape(self.content_img.shape).astype(np.float32) - self.model.pixel_mean
         # tensor_img = content_img, tensor_map = content_map
-        # current_features: sem3_1, sem4_1 conv output on content_img
+        # current_features: sem3_1, sem4_1 conv output given content_img
         current_features = self.compute_features(current_img, self.content_map)
 
         # Iterate through each of the style layers one by one, computing best matches.
