@@ -660,7 +660,6 @@ class NeuralGenerator(object):
 
         if args.cache:
             self.style_cache[l] = best_idx
-        pdb.set_trace()
         return best_idx
 
     def varshape(self):
