@@ -428,7 +428,7 @@ class NeuralGenerator(object):
         self.matcher_outputs = dict(zip(self.style_layers, lasagne.layers.get_output(nn_layers, self.matcher_inputs)))
 
         # conv of nn* computes the cross correlation between conv outputs of sem*, given content_img and style_img, respectively
-        # do_match_patches() will find the patch index corresponding to max conv output
+        # do_match_patches() will find the patch indices corresponding to max conv output
         self.compute_matches = {l: self.compile([self.matcher_history[l]], self.do_match_patches(l))\
                                                 for l in self.style_layers}
 

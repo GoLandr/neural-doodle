@@ -5,6 +5,11 @@
 # Copyright (c) 2016, Alex J. Champandard.
 #
 
+''' Dimensionalities and other numbers are based on the command:
+   python3 doodle-orig.py --style samples/Gogh.jpg --content samples/Seth.png \               
+   --output SethAsGogh.png --device=gpu0 --phases=4 --iterations=40
+'''
+
 import os
 import sys
 import bz2
@@ -405,11 +410,11 @@ class NeuralGenerator(object):
         # result: conv output of sem*, given style_img | style_map
         # a list of 6 arrays in shapes: 
         #          result[0::3]     result[1::3]     result[2::3]
-        # sem3_1 (660, 259, 3, 3), (660, 1, 3, 3),  (660, 1, 3, 3),  
-        # sem4_1 (140, 515, 3, 3), (140, 1, 3, 3),  (140, 1, 3, 3)
+        # sem3_1 (143, 259, 3, 3), (143, 1, 3, 3),  (143, 1, 3, 3),  
+        # sem4_1 (20, 515, 3, 3),  (20, 1, 3, 3),   (20, 1, 3, 3)
         #        sem3_1_outneighbs conv3_1_neibnorms map3_1_neibnorms 
         #        sem4_1_outneighbs conv4_1_neibnorms map4_1_neibnorms
-        # Store all the style patches layer by layer, resized to match slice size and cast to 16-bit for size. 
+        # Store all the style patches layer by layer, resized to match slice size and cast to 16-bit for size.
         self.style_data = {}
         for layer, *data in zip(self.style_layers, result[0::3], result[1::3], result[2::3]):
             # data[0]: neighbors of sem* output
@@ -418,14 +423,18 @@ class NeuralGenerator(object):
             patches = data[0]
             l = self.model.network['nn'+layer]
             # args.slices: 'Split patches up into this number of batches.' Default: 2
-            # nn3_1(4_1).num_filters: initialized to the style slice size. nn3_1(4_1).W will be set to patches later
+            # nn3_1(4_1).num_filters: initialized to the style slice size. 
+            # nn3_1(4_1).W will be set to each patch later
             l.num_filters = patches.shape[0] // args.slices
             # self.style_data['3_1']: [0]: sem3_1_outneighbs, [1]: conv3_1_neibnorms, 
             # [2]: map3_1_neibnorms, [3]: zeros(660) - storing matching history used in evaluate_slices()
             self.style_data[layer] = [d[:l.num_filters*args.slices].astype(np.float16) for d in data]\
                                    + [np.zeros((patches.shape[0],), dtype=np.float16)]
             print('  - Style layer {}: {} patches in {:,}kb.'.format(layer, patches.shape, patches.size//1000))
-
+        # style_data['3_1'][0]: (142, 259, 3, 3)
+        # style_data['4_1'][0]: (20, 515, 3, 3)
+        # num_filters - nn3_1: 71, nn4_1: 10
+        
     def prepare_optimization(self):
         """Optimization requires a function to compute the error (aka. loss) which is done in multiple components.
         Here we compile a function to run on the GPU that returns all components separately.
@@ -453,7 +462,7 @@ class NeuralGenerator(object):
         self.matcher_outputs = dict(zip(self.style_layers, lasagne.layers.get_output(nn_layers, self.matcher_inputs)))
 
         # conv of nn* computes the cross correlation between conv outputs of sem*, given content_img and style_img, respectively
-        # do_match_patches() will find the patch index corresponding to max conv output
+        # do_match_patches() will find the patch indices corresponding to max conv output
         self.compute_matches = {l: self.compile([self.matcher_history[l]], self.do_match_patches(l))\
                                                 for l in self.style_layers}
 
@@ -509,15 +518,21 @@ class NeuralGenerator(object):
         # Use node in the model to compute the result of the normalized cross-correlation, using results from the
         # nearest-neighbor layers called 'nn3_1' and 'nn4_1'.
         # dist: distances (nn_layer outputs)
-        # print( self.model.network['nn'+layer].num_filters )
+        # dist from nn3_1: [1, 71, 14, 9]
+        # dist from nn4_1: [1, 10, 6, 3]
         dist = self.matcher_outputs[layer]
+        # dist.shape is now (71,126) or (10, 18)
         dist = dist.reshape((dist.shape[1], -1))
         # Compute the score of each patch, taking into account statistics from previous iteration. This equalizes
         # the chances of the patches being selected when the user requests more variety.
+        # matcher_history[layer] <= dist.max(axis=1), the best dist for each filter in the last run
         offset = self.matcher_history[layer].reshape((-1, 1))
         scores = (dist - offset * args.variety)
         # Pick the best style patches for each patch in the current image, the result is an array of indices.
         # Also return the maximum value along both axis, used to compare slices and add patch variety.
+        # axis 0: filter num, axis 1: patch num
+        # argmax(axis=0): 126(18), argmax for each patch
+        # argmax(axis=1): 71(10), argmax for each filter
         return [scores.argmax(axis=0), scores.max(axis=0), dist.max(axis=1)]
 
 
@@ -566,6 +581,7 @@ class NeuralGenerator(object):
         for l, matches, patches in zip(self.style_layers, self.tensor_matches, result[0::3]):
             # Compute the mean squared error between the current patch and the best matching style patch.
             # Ignore the last channels (from semantic map) so errors returned are indicative of image only.
+            # matches = tensor_matches[i] = current_best[i]
             loss = T.mean((patches - matches[:,:self.model.channels[l]]) ** 2.0)
             style_loss.append(('style', l, args.style_weight * loss))
         return style_loss
@@ -592,6 +608,15 @@ class NeuralGenerator(object):
             excerpt = indices[index:index + batch_size]
             yield excerpt, [a[excerpt] for a in arrays]
 
+    # f is not directly used in this function
+    # f is set to matcher_tensors['3_1'('4_1')]. 
+    # dup3_1(4_1) = matcher_tensors['3_1'('4_1')], input of nn3_1(4_1)
+    # input to nn3_1: (1, 259, 16, 11)
+    # input to nn4_1: (1, 515, 8, 5)
+    # output from nn3_1: [1, 71, 14, 9]
+    # output from nn4_1: [1, 10, 6, 3]
+    # best_idx from nn3_1: 126
+    # best_idx from nn4_1:  18
     def evaluate_slices(self, f, l):
         # if cache is on, only use previously saved matches
         if args.cache and l in self.style_cache:
@@ -599,6 +624,7 @@ class NeuralGenerator(object):
 
         # style_data: style patches & norms, i.e. 'nn3(4)_1' output given style_img & style_map
         layer, data = self.model.network['nn'+l], self.style_data[l]
+        # history: 143 or 20. Effective: 142 or 20
         history = data[-1]
 
         best_idx, best_val = None, 0.0
@@ -609,7 +635,7 @@ class NeuralGenerator(object):
             # after normalization the conv result will be the cross correlation between sem* patches and the img patches
             self.normalize_components(l, weights, (bi, bs))
             # weights.shape: (71, 259, 3, 3)
-            # layer.num_filters: 71. channels: 259
+            # nn3_1(4_1) num_filters (output channels): 71. input channels: 259
             # print nn3_1.input_shape: (1,257,None,None).
             # 257 is based on the initialized map shape: 1,1,..,..
             # however the actual map shape is 1,3,..,... so nn3_1.input_shape should be 1,259,..,..
@@ -617,7 +643,10 @@ class NeuralGenerator(object):
 
             # history[idx] works as offsets to the correlations
             # encourage matches that are different from the previous iteration, to boost diversity
+            # max indices, max scores (dist - offset), max dists
+            # (126)/(18)         (126)/(18)            (71)/(10)
             cur_idx, cur_val, cur_match = self.compute_matches[l](history[idx])
+            
             if best_idx is None:
                 best_idx, best_val = cur_idx, cur_val
             else:
@@ -626,12 +655,17 @@ class NeuralGenerator(object):
                 best_idx[i] = idx[cur_idx[i]]
                 best_val[i] = cur_val[i]
 
+            # idx: indices for the current batch. 0..71 & 71..142
             history[idx] = cur_match
 
         if args.cache:
             self.style_cache[l] = best_idx
+        pdb.set_trace()
         return best_idx
 
+    def varshape(self):
+        return [ self.matcher_outputs[l].shape for l in self.style_layers ]
+        
     def evaluate(self, Xn):
         """Callback for the L-BFGS optimization that computes the loss and gradients on the GPU.
         """
@@ -648,6 +682,8 @@ class NeuralGenerator(object):
         for l, f in zip(self.style_layers, current_features):
             self.normalize_components(l, f, self.compute_norms(np, l, f))
             self.matcher_tensors[l].set_value(f)
+            # input to nn3_1: (1, 259, 16, 11)
+            # input to nn4_1: (1, 515, 8, 5)
 
             # Compute best matching patches in this style layer, going through all slices.
             warmup = bool(args.variety > 0.0 and self.iteration == 0)
@@ -656,6 +692,11 @@ class NeuralGenerator(object):
 
             patches = self.style_data[l][0]
             current_best.append(patches[best_idx].astype(np.float32))
+        # current_best: (126, 259, 3, 3), (18, 515, 3, 3)
+        # output from nn3_1: [1, 71, 14, 9]
+        # output from nn4_1: [1, 10, 6, 3]
+        #varshape = self.compile( [self.model.tensor_img, self.model.tensor_map], self.varshape() )
+        #shapes = varshape(current_img, self.content_map)
 
         # tensor_img = current_img, tensor_map = content_map, tensor_matches = current_best
         grads, *losses = self.compute_grad_and_losses(current_img, self.content_map, *current_best)
