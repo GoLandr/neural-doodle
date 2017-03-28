@@ -29,12 +29,13 @@ add_arg = parser.add_argument
 
 add_arg('--content',        default=None, type=str,         help='Content image path as optimization target.')
 add_arg('--content-weight', default=10.0, type=float,       help='Weight of content relative to style.')
+add_arg('--content-lapweight', default=10.0, type=float,       help='Weight of laplace content relative to style.')
 # consider add '1_laplace' to content_layers, to force similar laplacian of the new image and the content image
-add_arg('--content-layers', default='4_2', type=str,        help='The layer with which to match content.')
+add_arg('--content-layers', default='4_2,1_laplace', type=str,        help='The layer with which to match content.')
 add_arg('--style',          default=None, type=str,         help='Style image path to extract patches.')
 add_arg('--style-weight',   default=25.0, type=float,       help='Weight of style relative to content.')
-add_arg('--laplace-weight',   default=25.0, type=float,       help='Weight of style laplacian relative to content.')
-add_arg('--style-layers',   default='3_1,4_1,1_laplace', type=str,    help='The layers to match style patches.')
+add_arg('--style-lapweight',   default=25.0, type=float,       help='Weight of style laplacian relative to content.')
+add_arg('--style-layers',   default='3_1,4_1', type=str,    help='The layers to match style patches.')
 add_arg('--semantic-ext',   default='_sem.png', type=str,   help='File extension for the semantic maps.')
 add_arg('--semantic-weight', default=10.0, type=float,      help='Global weight of semantics vs. features.')
 add_arg('--output',         default='output.png', type=str, help='Output image path to save once done.')
@@ -196,6 +197,7 @@ class Model(object):
             net['nn'+suffix].W = theano.shared( net['nn'+suffix].W.get_value(), broadcastable=[False]* len(shape) )
         
         # laplacian layer
+        # do pooling first to reduce effective image size and reduce required memory & running time
         net['pool1_1']   = PoolLayer(net['img'], 2, mode='average_exc_pad')
         net['conv1_laplace'] = ConvLayer(net['pool1_1'], 1, 3, pad=1)
         laplacian = np.array( [ [0,-1,0], [-1,4,-1], [0,-1,0] ], dtype=theano.config.floatX )
@@ -595,7 +597,12 @@ class NeuralGenerator(object):
             # layer: output from conv4_2
             layer = self.model.tensor_outputs['conv'+l]
             loss = T.mean((layer - ref) ** 2.0)
-            content_loss.append(('content', l, args.content_weight * loss))
+            
+            if 'laplace' not in l:
+                content_loss.append(('content', l, args.content_weight * loss))
+            else:
+                content_loss.append(('content', l, args.content_lapweight * loss))
+
             print('  - Content layer conv{}: {} features in {:,}kb.'.format(l, ref.shape[1], ref.size//1000))
         return content_loss
 
@@ -621,7 +628,7 @@ class NeuralGenerator(object):
             if 'laplace' not in l:
                 style_loss.append(('style', l, args.style_weight * loss))
             else:
-                style_loss.append(('style', l, args.laplace_weight * loss))
+                style_loss.append(('style', l, args.style_lapweight * loss))
                 
         return style_loss
 
